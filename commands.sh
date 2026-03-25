@@ -1,3 +1,3 @@
 if [ "$1" = "run" ]; then
-  uv run main.py
+  uv run src/main.py
 fi
