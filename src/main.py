@@ -83,6 +83,11 @@ def start_backend(backend_dir: pathlib.Path) -> None:
         print(f"[error] Backend directory not found: {backend_dir}")
         sys.exit(1)
 
+    # Overwrite requirements.txt with known-good deps so the build never fails
+    # due to the agent producing bad/conflicting package names.
+    (backend_dir / "requirements.txt").write_text(
+        "fastapi\nuvicorn[standard]\nsqlmodel\n"
+    )
     (backend_dir / "Dockerfile").write_text(BACKEND_DOCKERFILE)
 
     client = docker.from_env()
