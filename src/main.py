@@ -13,7 +13,6 @@ Usage:
 
 import sys
 import time
-import textwrap
 import pathlib
 
 try:
@@ -31,46 +30,11 @@ except ImportError:
     import requests as _requests
 
 from src.agents.agents import run_agency
-
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-BACKEND_CONTAINER  = "altimate-backend"
-BACKEND_HOST_PORT  = 5000
-BACKEND_IMAGE      = "altimate-backend:latest"
-
-FRONTEND_CONTAINER = "altimate-frontend"
-FRONTEND_HOST_PORT = 3000
-FRONTEND_IMAGE     = "altimate-frontend:latest"
-
-BACKEND_DOCKERFILE = textwrap.dedent("""\
-    FROM python:3.12-slim
-    WORKDIR /app
-    COPY requirements.txt .
-    RUN pip install --no-cache-dir fastapi uvicorn[standard] sqlmodel -r requirements.txt
-    ENV PYTHONDONTWRITEBYTECODE=1
-    CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
-""")
-
-FRONTEND_DOCKERFILE = textwrap.dedent("""\
-    FROM nginx:alpine
-    COPY nginx.conf /etc/nginx/conf.d/default.conf
-    COPY . /usr/share/nginx/html
-    EXPOSE 80
-""")
-
-FRONTEND_NGINX_CONF = textwrap.dedent("""\
-    server {
-        listen 80;
-        root /usr/share/nginx/html;
-
-        location / {
-            try_files $uri $uri.html /index.html =404;
-        }
-    }
-""")
+from src.config import (
+    BACKEND_CONTAINER, BACKEND_HOST_PORT, BACKEND_IMAGE,
+    FRONTEND_CONTAINER, FRONTEND_HOST_PORT, FRONTEND_IMAGE,
+    BACKEND_DOCKERFILE, FRONTEND_DOCKERFILE, FRONTEND_NGINX_CONF,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +119,7 @@ def start_frontend(frontend_dir: pathlib.Path) -> None:
         print(f"[error] Frontend directory not found: {frontend_dir}")
         sys.exit(1)
 
+    (frontend_dir / "nginx.conf").write_text(FRONTEND_NGINX_CONF)
     (frontend_dir / "Dockerfile").write_text(FRONTEND_DOCKERFILE)
 
     client = docker.from_env()
