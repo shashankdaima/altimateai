@@ -1,18 +1,21 @@
 ROLE = "Frontend Developer"
 
-GOAL = "Fill in the main.js template to make every screen fully functional."
+GOAL = "Fill in the marked zones of the main.js template to make every screen functional."
 
 BACKSTORY = (
-    "You are a senior frontend engineer. You receive a JS template with /* FILL */ markers "
-    "and fill in only those sections. You never change the fixed sections."
+    "You are a senior frontend engineer. You receive a JS file with clearly marked fill zones "
+    "and write code only inside those zones. You never touch anything outside a fill zone."
 )
 
-# This is the complete file skeleton. The agent fills in the /* FILL */ sections only.
+# ---------------------------------------------------------------------------
+# JS skeleton — agent writes code ONLY inside // @@FILL ... // @@END_FILL zones.
+# Every other line is fixed and must be reproduced verbatim.
+# ---------------------------------------------------------------------------
 _JS_TEMPLATE = """\
-// ── CONFIG (DO NOT CHANGE) ────────────────────────────────────────────────
+// ── CONFIG ────────────────────────────────────────────────────────────────
 const API_BASE = 'http://localhost:5000';
 
-// ── HELPERS (DO NOT CHANGE) ───────────────────────────────────────────────
+// ── HELPERS ───────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (body) {
@@ -33,11 +36,11 @@ function showError(nearId, msg) {
     .forEach(e => e.remove()), 3000);
 }
 
-// ── NAVIGATION (DO NOT CHANGE) ────────────────────────────────────────────
-/* FILL: replace with the id suffixes of every <section id="screen-X"> in index.html.
-   If the HTML has <section id="screen-dashboard"> and <section id="screen-todos">,
-   then SCREENS = ['dashboard', 'todos']  ← suffix only, NOT 'screen-dashboard'. */
-const SCREENS = ['FILL_SCREEN_1', 'FILL_SCREEN_2'];
+// ── SCREENS ───────────────────────────────────────────────────────────────
+// @@FILL_SCREENS — replace ONLY the array values; keep the rest exactly as-is.
+// Each value is the id suffix from <section id="screen-X"> — e.g. 'dashboard', NOT 'screen-dashboard'.
+const SCREENS = ['PLACEHOLDER_1', 'PLACEHOLDER_2'];
+// @@END_FILL_SCREENS
 
 function show(name) {
   SCREENS.forEach(s => {
@@ -54,77 +57,64 @@ function show(name) {
 }
 
 // ── RENDER FUNCTIONS ──────────────────────────────────────────────────────
-/* FILL: write one async render function per screen.
-   Rules:
-   - Each render function fetches from a LIST endpoint (GET /resource) — never by dynamic id.
-   - Use the EXACT path from data_contract.endpoints. Never add /api/ prefix.
-   - Paginated responses: { items, total, page, page_size } — use .items.
-   - After setting innerHTML, re-wire any buttons inside the new HTML.
-   - Use the item's numeric id (t.id) in API paths — NEVER use a SCREENS value as an id.
-   - If two screens show the same resource with different filters, add a filter param
-     (e.g., renderTodos(filter='pending')) rather than fetching by id.
-
-   Example:
-
-   async function renderDashboard() {
-     const data = await api('GET', '/todos');
-     const items = data.items ?? data;
-     document.getElementById('list-todos').innerHTML = items.map(t =>
-       '<li class="flex justify-between items-center py-2 border-b">'
-       + '<span>' + t.title + '</span>'
-       + '<button id="btn-delete-' + t.id + '" class="text-red-500 text-sm px-2">Delete</button>'
-       + '</li>'
-     ).join('');
-     items.forEach(t => {
-       document.getElementById('btn-delete-' + t.id)
-         .addEventListener('click', async () => {
-           try {
-             await api('DELETE', '/todos/' + t.id);   // t.id is a number, not a screen name
-             await renderDashboard();
-           } catch(e) { showError('btn-delete-' + t.id, e.message); }
-         });
-     });
-   }
-*/
+// @@FILL_RENDER_FUNCTIONS
+// Write one async function per screen here, at the TOP LEVEL (not inside any other function).
+// Rules:
+//   • Fetch from a LIST endpoint — do NOT fetch a single item by id inside a render function.
+//   • Path = exact path from data_contract (no /api/ prefix, no extra segments).
+//   • Paginated responses: use data.items; plain arrays: use data directly.
+//   • After setting innerHTML, re-wire any buttons created inside the new HTML.
+//   • Use t.id (the item's numeric id) in DELETE/PATCH paths.
+//   • Write ONLY functions for screens that exist in the HTML above.
+//
+// Example:
+//   async function renderDashboard() {
+//     const data = await api('GET', '/todos');
+//     const items = data.items ?? data;
+//     document.getElementById('list-todos').innerHTML = items.map(t =>
+//       '<li>' + t.title
+//       + ' <button id="btn-del-' + t.id + '">Delete</button></li>'
+//     ).join('');
+//     items.forEach(t => {
+//       document.getElementById('btn-del-' + t.id)
+//         .addEventListener('click', async () => {
+//           await api('DELETE', '/todos/' + t.id);
+//           await renderDashboard();
+//         });
+//     });
+//   }
+// @@END_FILL_RENDER_FUNCTIONS
 
 // ── EVENT WIRING ──────────────────────────────────────────────────────────
-/* FILL: attach event listeners to every button/input/checkbox by id.
-   Called once at boot — use document.getElementById, not querySelector.
+// @@FILL_WIRE_EVENTS
+// Write the complete wireEvents function here, at the TOP LEVEL.
+// Rules:
+//   • Wire every static button/input/checkbox from the HTML by its exact id.
+//   • Each element id must appear at most ONCE — no duplicate listeners.
+//   • After POST/PATCH/DELETE, call the affected render function.
+//   • Do NOT wire buttons that are created dynamically inside innerHTML —
+//     those are wired inside their render function.
+//
+// Example:
+//   function wireEvents() {
+//     const btnAdd = document.getElementById('btn-add-todo');
+//     if (btnAdd) btnAdd.addEventListener('click', async () => {
+//       const titleEl = document.getElementById('input-todo-title');
+//       const title = titleEl.value.trim();
+//       if (!title) return;
+//       btnAdd.disabled = true;
+//       try {
+//         await api('POST', '/todos', { title });
+//         titleEl.value = '';
+//         await renderDashboard();
+//       } catch(e) { showError('btn-add-todo', e.message); }
+//       finally { btnAdd.disabled = false; }
+//     });
+//   }
+// @@END_FILL_WIRE_EVENTS
 
-   Example:
-
-   function wireEvents() {
-     const btnAdd = document.getElementById('btn-add-todo');
-     if (btnAdd) {
-       btnAdd.addEventListener('click', async () => {
-         const titleEl = document.getElementById('input-todo-title');
-         const title = titleEl.value.trim();
-         if (!title) return;
-         btnAdd.disabled = true;
-         try {
-           await api('POST', '/todos', { title });
-           titleEl.value = '';
-           await renderDashboard();
-         } catch(e) { showError('btn-add-todo', e.message); }
-         finally { btnAdd.disabled = false; }
-       });
-     }
-
-     // Enter key submits
-     document.querySelectorAll('input[type="text"]').forEach(inp => {
-       inp.addEventListener('keydown', e => {
-         if (e.key === 'Enter') {
-           const btn = document.getElementById('btn-add-todo');
-           if (btn) btn.click();
-         }
-       });
-     });
-   }
-*/
-
-// ── BOOT (DO NOT CHANGE THIS BLOCK) ──────────────────────────────────────
+// ── BOOT ──────────────────────────────────────────────────────────────────
 (async () => {
-  // hide all screens except the first
   SCREENS.forEach((s, i) => {
     const sec = document.getElementById('screen-' + s);
     if (sec && i !== 0) sec.classList.add('hidden');
@@ -132,13 +122,10 @@ function show(name) {
     if (btn) btn.addEventListener('click', () => show(s));
   });
 
-  // wire all events
   wireEvents();
 
-  /* FILL: call every render function here, e.g.:
-     await renderDashboard();
-     await renderTodos();
-  */
+  // @@FILL_BOOT_RENDERS — add one await renderX(); line per screen, nothing else.
+  // @@END_FILL_BOOT_RENDERS
 
   show(SCREENS[0]);
 })();
@@ -147,41 +134,41 @@ function show(name) {
 
 def task_description(ui_html: str) -> str:
     return (
-        "You have been given the HTML from the UI Designer.\n"
-        "Read every id, section name, and data-action carefully.\n\n"
+        "You are given the HTML file from the UI Designer and the data_contract.\n"
+        "Your job: fill in ONLY the four marked zones in the JS template below.\n\n"
         "=== ui/index.html ===\n"
         + ui_html
         + "\n=====================\n\n"
-        "You also have the `data_contract` with the exact API endpoints.\n\n"
-        "Fill in the /* FILL */ sections of the JS template below.\n"
-        "DO NOT change anything marked DO NOT CHANGE.\n"
-        "Your response must be exactly:\n\n"
+        "=== INSTRUCTIONS ===\n\n"
+        "Zone 1 — @@FILL_SCREENS\n"
+        "  Replace 'PLACEHOLDER_1', 'PLACEHOLDER_2', … with the id suffix of every\n"
+        "  <section id=\"screen-X\"> found in the HTML. Suffix only — no 'screen-' prefix.\n"
+        "  Count the screens first, then adjust the array length to match.\n\n"
+        "Zone 2 — @@FILL_RENDER_FUNCTIONS\n"
+        "  Write one async function per screen. Each calls a LIST endpoint from\n"
+        "  data_contract (e.g. GET /todos). No /api/ prefix. No fetching by id.\n"
+        "  Only write functions for screens that actually exist in the HTML.\n\n"
+        "Zone 3 — @@FILL_WIRE_EVENTS\n"
+        "  Write the wireEvents() function. Wire every static button/input from the\n"
+        "  HTML by its exact id. One listener per id — no duplicates.\n\n"
+        "Zone 4 — @@FILL_BOOT_RENDERS\n"
+        "  Add one 'await renderX();' line per screen — nothing else.\n\n"
+        "=== HARD RULES (violations cause a re-run) ===\n"
+        "  • Do NOT write any code outside the four fill zones.\n"
+        "  • Do NOT define functions or declare variables inside the boot IIFE.\n"
+        "  • Do NOT redeclare const SCREENS, API_BASE, api, showError, or show.\n"
+        "  • Do NOT add /api/ to any path — use EXACTLY the path from data_contract.\n"
+        "  • Do NOT invent screens that are not in the HTML.\n"
+        "  • Do NOT leave any @@FILL or @@END_FILL marker in your output.\n"
+        "  • Do NOT leave the PLACEHOLDER_ strings in the SCREENS array.\n"
+        "  • Every statement must end with a semicolon or closing brace — no syntax errors.\n\n"
+        "=== OUTPUT FORMAT ===\n"
+        "Output exactly one block:\n\n"
         "=== FILE: frontend/main.js ===\n"
-        "<the completed JS — no other text>\n\n"
-        "## Template to complete\n\n"
+        "<completed JS>\n\n"
+        "No prose, no explanation, no markdown fences around the file.\n\n"
+        "=== TEMPLATE TO COMPLETE ===\n\n"
         + _JS_TEMPLATE
-        + "\n\n"
-        "## What to fill in\n\n"
-        "1. SCREENS array — replace 'FILL_SCREEN_1', 'FILL_SCREEN_2' with the\n"
-        "   id suffix of every <section id=\"screen-X\"> in the HTML above.\n"
-        "   Rule: suffix ONLY — no 'screen-' prefix.\n"
-        "   Example: <section id=\"screen-dashboard\"> → SCREENS entry is 'dashboard'.\n\n"
-        "2. Render functions — one per screen.\n"
-        "   - Call a LIST endpoint (GET /resource) — never fetch by dynamic id in a render function.\n"
-        "   - Path must match data_contract exactly (no /api/ prefix, no extra segments).\n"
-        "   - Use data.items (paginated) or data directly (array).\n"
-        "   - Re-wire dynamically created buttons inside the forEach after innerHTML.\n"
-        "   - Use t.id (number from the item) in DELETE/PATCH paths — never use a SCREENS value.\n\n"
-        "3. wireEvents() — attach ONE listener per element id from the HTML.\n"
-        "   - Do not attach the same listener twice.\n"
-        "   - After POST/PATCH/DELETE call the affected render function.\n\n"
-        "4. Boot render calls — add one await renderX() per screen.\n\n"
-        "NEVER:\n"
-        "- Add '/api/' prefix — paths are exactly as in data_contract.\n"
-        "- Use SCREENS[i] or a screen name as an API path segment.\n"
-        "- Wire the same element id more than once.\n"
-        "- Redefine api(), showError(), show(), or the boot IIFE.\n\n"
-        "Output ONLY the completed JS inside the delimiter. No prose."
     ).strip()
 
 

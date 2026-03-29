@@ -32,11 +32,13 @@ def task_description(
         "---\n\n"
         "Output ONLY a JSON object — no prose, no markdown fences:\n\n"
         "{\n"
-        '  "pass": true,\n'
+        '  "pass": <true only if ALL three ok fields are true, false otherwise>,\n'
         '  "ui":       { "ok": true,  "issues": "" },\n'
         '  "frontend": { "ok": true,  "issues": "" },\n'
         '  "backend":  { "ok": true,  "issues": "" }\n'
         "}\n\n"
+        "CRITICAL: `pass` must be false if ANY component has ok=false. "
+        "Setting pass=true with any ok=false is always wrong.\n\n"
         "Check each component against these criteria:\n\n"
         "### ui\n"
         "- Every screen in design_contract.screens (excluding auth) has a "
@@ -47,11 +49,16 @@ def task_description(
         "### frontend\n"
         "- No syntax errors (check compile_errors field above).\n"
         "- SCREENS array values are id suffixes only (e.g. 'dashboard', not 'screen-dashboard').\n"
+        "- No PLACEHOLDER_ or @@FILL markers remain in main.js.\n"
+        "- All async render functions and wireEvents() are defined at the TOP LEVEL — "
+        "  NOT inside the boot IIFE `(async () => { ... })()`.\n"
         "- Every data_contract endpoint used in main.js matches the contract path exactly "
-        "  (no wrong prefixes like /api/).\n"
-        "- API calls never use a SCREENS value as an item id — item ids come from data objects.\n"
-        "- Every render function is called in the boot block.\n"
-        "- wireEvents() attaches listeners for every button/input/checkbox id in the HTML.\n\n"
+        "  (no /api/ prefix, no extra path segments like /new or /delete).\n"
+        "- Render functions only call LIST endpoints (GET /resource) — never by dynamic id.\n"
+        "- API calls never use a SCREENS value as an item id — item ids come from data (t.id).\n"
+        "- Every render function corresponds to a screen that exists in the HTML.\n"
+        "- wireEvents() attaches listeners for every static button/input/checkbox id in the HTML.\n"
+        "- No duplicate const declarations (e.g. const btnDelete declared twice).\n\n"
         "### backend\n"
         "- No syntax errors (check compile_errors field above).\n"
         "- CORSMiddleware is imported AND added via app.add_middleware.\n"

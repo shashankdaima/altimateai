@@ -1,448 +1,508 @@
+"""
+SoftwareAgency — CrewAI pipeline that turns a PRD into a working full-stack app.
+
+Pipeline stages
+───────────────
+  Phase 1  manager → contracts → ui + backend   (sequential crew)
+  Phase 2  frontend agent with injected UI HTML  (single-task crew)
+  Phase 3  reviewer loop — up to MAX_REVIEW_ROUNDS fix passes
+"""
+
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
-
-from json_repair import repair_json
 
 from crewai import Agent, Crew, LLM, Process, Task
 
 # Make project root importable when running directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.tools.file_writer import write_json, write_text# noqa
-from src.tools.pdf_reader import extract_text  # noqa
-from src.agents.prompts import backend, contract, frontend, manager, reviewer, ui_designer # noqa
+from src.tools.file_writer import write_json, write_text  # noqa
+from src.agents.prompts import backend, contract, frontend, manager, reviewer, ui_designer  # noqa
+from src.agents.utils import (  # noqa
+    _fix_contracts_with_llm,
+    _js_check,
+    _compile_check,
+    _load_prd,
+    _parse_contracts,
+    _parse_files,
+    _read_ws,
+    _save_files,
+)
 from src.config import USE_LOCAL_MODEL
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
-def _load_prd(prd_path: str) -> str:
-    if prd_path.lower().endswith(".pdf"):
-        return extract_text(prd_path)
-    return Path(prd_path).read_text(encoding="utf-8")
-
-
-def _parse_files(raw: str, prefix: str) -> dict[str, str]:
-    """Extract files from agent output delimited by '=== FILE: <path> ==='."""
-    pattern = re.compile(r"=== FILE:\s*(.+?)\s*===\s*\n(.*?)(?==== FILE:|$)", re.DOTALL)
-    return {m.group(1).strip(): m.group(2).strip() for m in pattern.finditer(raw)}
-
-
-def _save_files(files: dict[str, str], workspace: Path) -> None:
-    for rel_path, content in files.items():
-        dest = workspace / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-        print(f"  [saved] {dest}")
-
-
-def _parse_contracts(raw: str) -> tuple[dict, dict]:
-    """Extract design_contract and data_contract from JSON agent output."""
-    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
-
-    # 1. Try strict parse
-    try:
-        data = json.loads(cleaned)
-        return data["design_contract"], data["data_contract"]
-    except json.JSONDecodeError:
-        pass
-
-    # 2. Try programmatic repair (handles trailing commas, missing quotes, etc.)
-    print("[contracts] Strict JSON parse failed — trying json_repair ...")
-    repaired = repair_json(cleaned, return_objects=True)
-    if isinstance(repaired, dict) and "design_contract" in repaired:
-        print("[contracts] json_repair succeeded.")
-        return repaired["design_contract"], repaired["data_contract"]
-
-    raise ValueError("json_repair could not produce valid contracts.")
-
-
-def _fix_contracts_with_llm(bad_raw: str, llm, max_retries: int = 3) -> tuple[dict, dict]:
-    """Last resort: ask a dedicated LLM agent to rewrite the contracts as valid JSON."""
-    repair_agent = Agent(
-        role="JSON Contract Repair Specialist",
-        goal="Rewrite broken JSON contracts as perfectly valid JSON.",
-        backstory=(
-            "You are an expert at reading malformed JSON and rewriting it correctly. "
-            "You output ONLY raw JSON — no markdown, no prose, no explanation."
-        ),
-        llm=llm,
-        verbose=False,
-    )
-
-    current = bad_raw
-    for attempt in range(1, max_retries + 1):
-        print(f"[contracts] LLM repair attempt {attempt}/{max_retries} ...")
-        # Show the LLM the specific error so it knows what to target
-        try:
-            json.loads(re.sub(r"```(?:json)?\s*|\s*```", "", current).strip())
-            error_hint = ""
-        except json.JSONDecodeError as e:
-            error_hint = f"\n\nSpecific error: {e}"
-
-        fix_task = Task(
-            description=(
-                "The output below must be a valid JSON object with exactly two keys: "
-                "`design_contract` and `data_contract`.\n"
-                "It currently has syntax errors — rewrite it as valid JSON."
-                + error_hint
-                + "\n\nBroken output:\n```\n" + current + "\n```\n\n"
-                "Return ONLY the corrected raw JSON. No markdown fences, no prose."
-            ),
-            expected_output="A valid JSON object with keys `design_contract` and `data_contract`.",
-            agent=repair_agent,
-        )
-        Crew(agents=[repair_agent], tasks=[fix_task],
-             process=Process.sequential).kickoff()
-        current = fix_task.output.raw
-        try:
-            return _parse_contracts(current)
-        except Exception as exc:
-            print(f"[contracts] LLM repair attempt {attempt} still invalid: {exc}")
-
-    raise ValueError(f"Could not produce valid contract JSON after {max_retries} LLM attempts.")
-
-
-def _read_ws(path: Path) -> str:
-    """Read a workspace file, return empty string if missing."""
-    return path.read_text(encoding="utf-8") if path.exists() else ""
-
-
-def _compile_check(ws: Path) -> str:
-    """Run py_compile on backend/main.py and grep for known runtime pitfalls."""
-    backend_py = ws / "backend" / "main.py"
-    if not backend_py.exists():
-        return "backend/main.py not found"
-    result = subprocess.run(
-        [sys.executable, "-m", "py_compile", str(backend_py)],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return f"backend/main.py syntax error:\n{result.stderr}"
-
-    # Additional static checks for known runtime pitfalls
-    code = backend_py.read_text(encoding="utf-8")
-    issues = []
-    if "model_dict" in code:
-        issues.append("model_dict() is not a real Pydantic/SQLModel method — use model_dump() instead")
-    if "body.dict(" in code:
-        issues.append("body.dict() is deprecated — use body.model_dump()")
-    if "CORSMiddleware" not in code:
-        issues.append("CORSMiddleware missing — CORS will be broken")
-    return "\n".join(issues)
-
-
-def _js_check(ws: Path) -> str:
-    """Static checks on frontend/main.js for known pitfalls."""
-    js_path = ws / "frontend" / "main.js"
-    if not js_path.exists():
-        return "\nfrontend/main.js not found"
-    code = js_path.read_text(encoding="utf-8")
-    issues = []
-
-    # SCREENS values must be plain suffixes (no 'screen-' prefix inside the array)
-    import re
-    screens_match = re.search(r"const SCREENS\s*=\s*\[([^\]]+)\]", code)
-    if screens_match:
-        entries = screens_match.group(1)
-        if "screen-" in entries:
-            issues.append(
-                "JS: SCREENS array contains 'screen-' prefix — values must be "
-                "suffixes only (e.g. 'dashboard', not 'screen-dashboard')"
-            )
-
-    # API paths must not contain /api/
-    if "'/api/" in code or '"/api/' in code:
-        issues.append("JS: API call uses /api/ prefix — paths must match data_contract exactly (no /api/)")
-
-    # Must define wireEvents
-    if "function wireEvents" not in code:
-        issues.append("JS: wireEvents() function is missing")
-
-    return ("\n" + "\n".join(issues)) if issues else ""
-
-
-# ---------------------------------------------------------------------------
-# Agency
-# ---------------------------------------------------------------------------
-
-def run_agency(prd_path: str, workspace: str = "workspaces/output") -> dict:
+class SoftwareAgency:
     """
-    Run the full software agency pipeline.
+    Orchestrates the full code-generation pipeline for a given PRD.
 
-    Args:
-        prd_path:  Path to a PDF or text PRD file.
-        workspace: Directory where all generated files will be saved.
-
-    Returns:
-        A dict with keys: plan, design_contract, data_contract,
-        and the paths of every written file.
+    Usage
+    -----
+        agency = SoftwareAgency("samples/TodoPRD.pdf", "workspaces/output")
+        outputs = agency.run()
     """
-    ws = Path(workspace)
-    ws.mkdir(parents=True, exist_ok=True)
-
-    prd_text = _load_prd(prd_path)
-    if(USE_LOCAL_MODEL):
-        llm = LLM(model="anthropic/claude-sonnet-4-6")
-    else:
-        llm = LLM(model="ollama/llama3.2", base_url="http://localhost:11434")
-
-    # ------------------------------------------------------------------
-    # Agents
-    # ------------------------------------------------------------------
-    mgr_agent = Agent(
-        role=manager.ROLE,
-        goal=manager.GOAL,
-        backstory=manager.BACKSTORY,
-        llm=llm,
-        verbose=True,
-    )
-
-    contract_agent = Agent(
-        role=contract.ROLE,
-        goal=contract.GOAL,
-        backstory=contract.BACKSTORY,
-        llm=llm,
-        verbose=True,
-    )
-
-    ui_agent = Agent(
-        role=ui_designer.ROLE,
-        goal=ui_designer.GOAL,
-        backstory=ui_designer.BACKSTORY,
-        llm=llm,
-        verbose=True,
-    )
-
-    fe_agent = Agent(
-        role=frontend.ROLE,
-        goal=frontend.GOAL,
-        backstory=frontend.BACKSTORY,
-        llm=llm,
-        verbose=True,
-    )
-
-    be_agent = Agent(
-        role=backend.ROLE,
-        goal=backend.GOAL,
-        backstory=backend.BACKSTORY,
-        llm=llm,
-        verbose=True,
-    )
-
-    # ------------------------------------------------------------------
-    # Tasks
-    # ------------------------------------------------------------------
-    task_plan = Task(
-        description=manager.task_description(prd_text),
-        expected_output=manager.TASK_EXPECTED_OUTPUT,
-        agent=mgr_agent,
-    )
-
-    task_contracts = Task(
-        description=contract.task_description(),
-        expected_output=contract.TASK_EXPECTED_OUTPUT,
-        agent=contract_agent,
-        context=[task_plan],
-    )
-
-    task_ui = Task(
-        description=ui_designer.task_description(),
-        expected_output=ui_designer.TASK_EXPECTED_OUTPUT,
-        agent=ui_agent,
-        context=[task_contracts],
-    )
-
-    task_backend = Task(
-        description=backend.task_description(),
-        expected_output=backend.TASK_EXPECTED_OUTPUT,
-        agent=be_agent,
-        context=[task_contracts],
-    )
-
-    # ------------------------------------------------------------------
-    # Phase 1: manager → contracts → ui + backend (parallel-ish, sequential process)
-    # ------------------------------------------------------------------
-    crew_phase1 = Crew(
-        agents=[mgr_agent, contract_agent, ui_agent, be_agent],
-        tasks=[task_plan, task_contracts, task_ui, task_backend],
-        process=Process.sequential,
-        verbose=True,
-    )
-    crew_phase1.kickoff()
-
-    # ------------------------------------------------------------------
-    # Persist phase 1 outputs
-    # ------------------------------------------------------------------
-    outputs: dict = {}
-
-    plan_text: str = task_plan.output.raw
-    write_text(str(ws / "plan.md"), plan_text)
-    outputs["plan"] = str(ws / "plan.md")
-
-    try:
-        design_contract, data_contract = _parse_contracts(task_contracts.output.raw)
-    except Exception as exc:
-        print(f"[contracts] Initial parse failed: {exc}")
-        design_contract, data_contract = _fix_contracts_with_llm(task_contracts.output.raw, llm)
-
-    write_json(str(ws / "contracts" / "design_contract.json"), design_contract)
-    write_json(str(ws / "contracts" / "data_contract.json"), data_contract)
-    outputs["design_contract"] = design_contract
-    outputs["data_contract"] = data_contract
-
-    ui_files = _parse_files(task_ui.output.raw, "ui/")
-    _save_files(ui_files, ws)
-
-    # Copy ui/index.html → frontend/index.html so main.js loads alongside it
-    ui_html = ui_files.get("ui/index.html", task_ui.output.raw)
-    fe_html_path = ws / "frontend" / "index.html"
-    fe_html_path.parent.mkdir(parents=True, exist_ok=True)
-    fe_html_path.write_text(ui_html, encoding="utf-8")
-    print("  [copied] ui/index.html → frontend/index.html")
-
-    be_files = _parse_files(task_backend.output.raw, "backend/")
-    _save_files(be_files, ws)
-
-    # ------------------------------------------------------------------
-    # Phase 2: frontend — inject actual UI HTML into the task description
-    # ------------------------------------------------------------------
-
-    task_frontend = Task(
-        description=frontend.task_description(ui_html),
-        expected_output=frontend.TASK_EXPECTED_OUTPUT,
-        agent=fe_agent,
-        context=[task_contracts],
-    )
-
-    crew_phase2 = Crew(
-        agents=[fe_agent],
-        tasks=[task_frontend],
-        process=Process.sequential,
-        verbose=True,
-    )
-    crew_phase2.kickoff()
-
-    # Only main.js is expected — save it into frontend/
-    fe_files = _parse_files(task_frontend.output.raw, "frontend/")
-    if fe_files:
-        _save_files(fe_files, ws)
-    else:
-        fallback = ws / "frontend" / "main.js"
-        fallback.write_text(task_frontend.output.raw, encoding="utf-8")
-        print(f"  [fallback] saved raw frontend output → {fallback}")
-
-    # ------------------------------------------------------------------
-    # Phase 3: review loop — up to 3 attempts per component
-    # ------------------------------------------------------------------
-    review_agent = Agent(
-        role=reviewer.ROLE,
-        goal=reviewer.GOAL,
-        backstory=reviewer.BACKSTORY,
-        llm=llm,
-        verbose=True,
-    )
 
     MAX_REVIEW_ROUNDS = 3
-    for round_num in range(1, MAX_REVIEW_ROUNDS + 1):
-        print(f"\n[review] Round {round_num}/{MAX_REVIEW_ROUNDS} ...")
 
-        # Collect compile + static errors
-        compile_errors = _compile_check(ws)
-        compile_errors += _js_check(ws)
+    def __init__(self, prd_path: str, workspace: str = "workspaces/output") -> None:
+        """
+        Initialise the agency.
 
-        review_task = Task(
-            description=reviewer.task_description(
-                design_contract=json.dumps(design_contract, indent=2),
-                data_contract=json.dumps(data_contract, indent=2),
-                ui_html=_read_ws(ws / "ui" / "index.html"),
-                main_js=_read_ws(ws / "frontend" / "main.js"),
-                backend_py=_read_ws(ws / "backend" / "main.py"),
-                compile_errors=compile_errors,
-            ),
-            expected_output=reviewer.TASK_EXPECTED_OUTPUT,
-            agent=review_agent,
+        Parameters
+        ----------
+        prd_path:  Path to a PDF or plain-text PRD file.
+        workspace: Directory where all generated artefacts will be written.
+        """
+        self.prd_path = prd_path
+        self.ws = Path(workspace)
+        self.ws.mkdir(parents=True, exist_ok=True)
+
+        self.prd_text: str = _load_prd(prd_path)
+        self.llm: LLM = self._make_llm()
+
+        # Populated by _setup_agents()
+        self.mgr_agent: Agent
+        self.contract_agent: Agent
+        self.ui_agent: Agent
+        self.fe_agent: Agent
+        self.be_agent: Agent
+        self.review_agent: Agent
+
+        # Populated during the run
+        self.design_contract: dict = {}
+        self.data_contract: dict = {}
+        self.ui_html: str = ""
+        self.outputs: dict = {}
+
+    # ------------------------------------------------------------------
+    # LLM factory
+    # ------------------------------------------------------------------
+
+    def _make_llm(self) -> LLM:
+        """
+        Return the LLM instance based on the MODEL_CONFIG env variable.
+
+        Uses Anthropic Claude Sonnet when MODEL_CONFIG=cloud (default),
+        or a local Ollama llama3.2 endpoint when MODEL_CONFIG=local.
+        """
+        if USE_LOCAL_MODEL:
+            return LLM(model="anthropic/claude-sonnet-4-6")
+        return LLM(model="ollama/llama3.2", base_url="http://localhost:11434")
+
+    # ------------------------------------------------------------------
+    # Agent setup
+    # ------------------------------------------------------------------
+
+    def _setup_agents(self) -> None:
+        """
+        Instantiate all CrewAI agents and store them as instance attributes.
+
+        Each agent gets the shared LLM and the role/goal/backstory defined
+        in its corresponding prompt module under src/agents/prompts/.
+        """
+        self.mgr_agent = Agent(
+            role=manager.ROLE,
+            goal=manager.GOAL,
+            backstory=manager.BACKSTORY,
+            llm=self.llm,
+            verbose=True,
         )
-        Crew(agents=[review_agent], tasks=[review_task],
-             process=Process.sequential, verbose=True).kickoff()
+        self.contract_agent = Agent(
+            role=contract.ROLE,
+            goal=contract.GOAL,
+            backstory=contract.BACKSTORY,
+            llm=self.llm,
+            verbose=True,
+        )
+        self.ui_agent = Agent(
+            role=ui_designer.ROLE,
+            goal=ui_designer.GOAL,
+            backstory=ui_designer.BACKSTORY,
+            llm=self.llm,
+            verbose=True,
+        )
+        self.fe_agent = Agent(
+            role=frontend.ROLE,
+            goal=frontend.GOAL,
+            backstory=frontend.BACKSTORY,
+            llm=self.llm,
+            verbose=True,
+        )
+        self.be_agent = Agent(
+            role=backend.ROLE,
+            goal=backend.GOAL,
+            backstory=backend.BACKSTORY,
+            llm=self.llm,
+            verbose=True,
+        )
+        self.review_agent = Agent(
+            role=reviewer.ROLE,
+            goal=reviewer.GOAL,
+            backstory=reviewer.BACKSTORY,
+            llm=self.llm,
+            verbose=True,
+        )
 
+    # ------------------------------------------------------------------
+    # Phase 1 — manager → contracts → ui + backend
+    # ------------------------------------------------------------------
+
+    def _run_phase1(self) -> tuple[Task, Task, Task, Task]:
+        """
+        Run the first sequential crew: manager → contracts → UI designer → backend.
+
+        Returns the four completed Task objects so their outputs can be
+        inspected and persisted by _persist_phase1().
+
+        Flow
+        ----
+          task_plan      → manager reads the PRD and produces a Markdown plan
+          task_contracts → contract architect produces design + data contracts
+          task_ui        → UI designer produces ui/index.html from design_contract
+          task_backend   → backend developer produces backend/main.py from data_contract
+        """
+        task_plan = Task(
+            description=manager.task_description(self.prd_text),
+            expected_output=manager.TASK_EXPECTED_OUTPUT,
+            agent=self.mgr_agent,
+        )
+        task_contracts = Task(
+            description=contract.task_description(),
+            expected_output=contract.TASK_EXPECTED_OUTPUT,
+            agent=self.contract_agent,
+            context=[task_plan],
+        )
+        task_ui = Task(
+            description=ui_designer.task_description(),
+            expected_output=ui_designer.TASK_EXPECTED_OUTPUT,
+            agent=self.ui_agent,
+            context=[task_contracts],
+        )
+        task_backend = Task(
+            description=backend.task_description(),
+            expected_output=backend.TASK_EXPECTED_OUTPUT,
+            agent=self.be_agent,
+            context=[task_contracts],
+        )
+
+        Crew(
+            agents=[self.mgr_agent, self.contract_agent, self.ui_agent, self.be_agent],
+            tasks=[task_plan, task_contracts, task_ui, task_backend],
+            process=Process.sequential,
+            verbose=True,
+        ).kickoff()
+
+        return task_plan, task_contracts, task_ui, task_backend
+
+    def _persist_phase1(
+        self,
+        task_plan: Task,
+        task_contracts: Task,
+        task_ui: Task,
+        task_backend: Task,
+    ) -> None:
+        """
+        Save all Phase 1 artefacts to the workspace and populate instance state.
+
+        Writes
+        ------
+          plan.md
+          contracts/design_contract.json
+          contracts/data_contract.json
+          ui/index.html
+          frontend/index.html   (copy of ui/index.html, required by main.js)
+          backend/main.py  (+ requirements.txt if produced)
+
+        Also parses and repairs contract JSON, storing the dicts in
+        self.design_contract, self.data_contract, and self.ui_html.
+        """
+        # Plan
+        plan_text: str = task_plan.output.raw
+        write_text(str(self.ws / "plan.md"), plan_text)
+        self.outputs["plan"] = str(self.ws / "plan.md")
+
+        # Contracts — attempt strict parse, then json_repair, then LLM repair
         try:
-            raw = re.sub(r"```(?:json)?\s*|\s*```", "", review_task.output.raw).strip()
-            report = json.loads(raw)
+            self.design_contract, self.data_contract = _parse_contracts(
+                task_contracts.output.raw
+            )
+        except Exception as exc:
+            print(f"[contracts] Initial parse failed: {exc}")
+            self.design_contract, self.data_contract = _fix_contracts_with_llm(
+                task_contracts.output.raw, self.llm
+            )
+
+        write_json(str(self.ws / "contracts" / "design_contract.json"), self.design_contract)
+        write_json(str(self.ws / "contracts" / "data_contract.json"), self.data_contract)
+        self.outputs["design_contract"] = self.design_contract
+        self.outputs["data_contract"] = self.data_contract
+
+        # UI HTML
+        ui_files = _parse_files(task_ui.output.raw, "ui/")
+        _save_files(ui_files, self.ws)
+        self.ui_html = ui_files.get("ui/index.html", task_ui.output.raw)
+
+        # Copy ui/index.html → frontend/index.html so main.js loads alongside it
+        fe_html_path = self.ws / "frontend" / "index.html"
+        fe_html_path.parent.mkdir(parents=True, exist_ok=True)
+        fe_html_path.write_text(self.ui_html, encoding="utf-8")
+        print("  [copied] ui/index.html → frontend/index.html")
+
+        # Backend
+        be_files = _parse_files(task_backend.output.raw, "backend/")
+        _save_files(be_files, self.ws)
+
+    # ------------------------------------------------------------------
+    # Phase 2 — frontend (needs UI HTML from Phase 1)
+    # ------------------------------------------------------------------
+
+    def _run_phase2(self, task_contracts: Task) -> None:
+        """
+        Run the second crew: frontend developer produces frontend/main.js.
+
+        The UI HTML generated in Phase 1 is injected directly into the task
+        description so the agent knows every element id and screen name before
+        it fills in the JS template.
+
+        Falls back to saving the raw agent output as main.js if the agent
+        omits the '=== FILE: ===' delimiter.
+
+        Parameters
+        ----------
+        task_contracts: The completed contracts Task from Phase 1, passed as
+                        context so the agent can read the data_contract endpoints.
+        """
+        task_frontend = Task(
+            description=frontend.task_description(self.ui_html),
+            expected_output=frontend.TASK_EXPECTED_OUTPUT,
+            agent=self.fe_agent,
+            context=[task_contracts],
+        )
+
+        Crew(
+            agents=[self.fe_agent],
+            tasks=[task_frontend],
+            process=Process.sequential,
+            verbose=True,
+        ).kickoff()
+
+        fe_files = _parse_files(task_frontend.output.raw, "frontend/")
+        if fe_files:
+            _save_files(fe_files, self.ws)
+        else:
+            fallback = self.ws / "frontend" / "main.js"
+            fallback.write_text(task_frontend.output.raw, encoding="utf-8")
+            print(f"  [fallback] saved raw frontend output → {fallback}")
+
+    # ------------------------------------------------------------------
+    # Phase 3 — review loop
+    # ------------------------------------------------------------------
+
+    def _run_review_loop(self) -> None:
+        """
+        Run up to MAX_REVIEW_ROUNDS rounds of automated review and repair.
+
+        Each round:
+          1. Static checks (_compile_check, _js_check) produce deterministic
+             error strings that are injected into the reviewer's task so it
+             cannot overlook them.
+          2. The reviewer LLM reads all artefacts + contract and outputs a
+             structured JSON report: {pass, ui:{ok,issues}, frontend:{ok,issues},
+             backend:{ok,issues}}.
+          3. Any component flagged ok=false is re-generated with its issues
+             appended to the original task description.
+          4. If the reviewer reports pass=true, or no component was re-run,
+             the loop exits early.
+        """
+        for round_num in range(1, self.MAX_REVIEW_ROUNDS + 1):
+            print(f"\n[review] Round {round_num}/{self.MAX_REVIEW_ROUNDS} ...")
+
+            static_errors = _compile_check(self.ws) + _js_check(self.ws)
+
+            review_task = Task(
+                description=reviewer.task_description(
+                    design_contract=json.dumps(self.design_contract, indent=2),
+                    data_contract=json.dumps(self.data_contract, indent=2),
+                    ui_html=_read_ws(self.ws / "ui" / "index.html"),
+                    main_js=_read_ws(self.ws / "frontend" / "main.js"),
+                    backend_py=_read_ws(self.ws / "backend" / "main.py"),
+                    compile_errors=static_errors,
+                ),
+                expected_output=reviewer.TASK_EXPECTED_OUTPUT,
+                agent=self.review_agent,
+            )
+            Crew(
+                agents=[self.review_agent],
+                tasks=[review_task],
+                process=Process.sequential,
+                verbose=True,
+            ).kickoff()
+
+            report = self._parse_review_report(review_task.output.raw)
+            if report is None:
+                break
+
+            print(f"[review] Report: {json.dumps(report, indent=2)}")
+
+            # Compute pass ourselves — never trust the LLM's pass field directly,
+            # since it sometimes sets pass=true while individual ok fields are false.
+            all_ok = (
+                report.get("ui", {}).get("ok", True)
+                and report.get("frontend", {}).get("ok", True)
+                and report.get("backend", {}).get("ok", True)
+            )
+            if all_ok:
+                print("[review] All checks passed.")
+                break
+
+            reran = self._apply_review_fixes(report)
+            if not reran:
+                break
+
+    def _parse_review_report(self, raw: str) -> dict | None:
+        """
+        Parse the reviewer's JSON output into a Python dict.
+
+        Strips markdown code fences before parsing. Returns None if parsing
+        fails so the caller can break out of the review loop gracefully.
+
+        Parameters
+        ----------
+        raw: The raw string output from the reviewer agent.
+
+        Returns
+        -------
+        A dict with keys 'pass', 'ui', 'frontend', 'backend', or None on error.
+        """
+        try:
+            cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+            return json.loads(cleaned)
         except Exception as exc:
             print(f"[review] Could not parse reviewer output: {exc}")
-            break
+            return None
 
-        print(f"[review] Report: {json.dumps(report, indent=2)}")
+    def _apply_review_fixes(self, report: dict) -> bool:
+        """
+        Re-run whichever agents have issues reported by the reviewer.
 
-        if report.get("pass"):
-            print("[review] All checks passed.")
-            break
+        For each component (ui, frontend, backend) where ok=false, the
+        original task is re-created with the reviewer's issues string appended
+        to the description, then a fresh single-task crew is kicked off and
+        the output saved to the workspace.
 
+        Parameters
+        ----------
+        report: The parsed reviewer JSON report.
+
+        Returns
+        -------
+        True if at least one component was re-run, False otherwise.
+        """
         reran = False
 
-        # Re-run UI designer
         if not report.get("ui", {}).get("ok", True):
             print(f"[review] Fixing UI: {report['ui']['issues']}")
             t = Task(
                 description=ui_designer.task_description()
                     + f"\n\nReviewer issues to fix:\n{report['ui']['issues']}",
                 expected_output=ui_designer.TASK_EXPECTED_OUTPUT,
-                agent=ui_agent,
-                context=[task_contracts],
+                agent=self.ui_agent,
             )
-            Crew(agents=[ui_agent], tasks=[t], process=Process.sequential,
+            Crew(agents=[self.ui_agent], tasks=[t], process=Process.sequential,
                  verbose=True).kickoff()
             new_ui = _parse_files(t.output.raw, "ui/")
-            _save_files(new_ui, ws)
-            ui_html = new_ui.get("ui/index.html", ui_html)
-            (ws / "frontend" / "index.html").write_text(ui_html, encoding="utf-8")
+            _save_files(new_ui, self.ws)
+            self.ui_html = new_ui.get("ui/index.html", self.ui_html)
+            (self.ws / "frontend" / "index.html").write_text(self.ui_html, encoding="utf-8")
             reran = True
 
-        # Re-run frontend
         if not report.get("frontend", {}).get("ok", True):
             print(f"[review] Fixing frontend: {report['frontend']['issues']}")
             t = Task(
-                description=frontend.task_description(ui_html)
+                description=frontend.task_description(self.ui_html)
                     + f"\n\nReviewer issues to fix:\n{report['frontend']['issues']}",
                 expected_output=frontend.TASK_EXPECTED_OUTPUT,
-                agent=fe_agent,
+                agent=self.fe_agent,
             )
-            Crew(agents=[fe_agent], tasks=[t], process=Process.sequential,
+            Crew(agents=[self.fe_agent], tasks=[t], process=Process.sequential,
                  verbose=True).kickoff()
             fe_fixed = _parse_files(t.output.raw, "frontend/")
             if fe_fixed:
-                _save_files(fe_fixed, ws)
+                _save_files(fe_fixed, self.ws)
             else:
-                (ws / "frontend" / "main.js").write_text(
-                    t.output.raw, encoding="utf-8")
+                (self.ws / "frontend" / "main.js").write_text(t.output.raw, encoding="utf-8")
             reran = True
 
-        # Re-run backend
         if not report.get("backend", {}).get("ok", True):
             print(f"[review] Fixing backend: {report['backend']['issues']}")
             t = Task(
                 description=backend.task_description()
                     + f"\n\nReviewer issues to fix:\n{report['backend']['issues']}",
                 expected_output=backend.TASK_EXPECTED_OUTPUT,
-                agent=be_agent,
-                context=[task_contracts],
+                agent=self.be_agent,
             )
-            Crew(agents=[be_agent], tasks=[t], process=Process.sequential,
+            Crew(agents=[self.be_agent], tasks=[t], process=Process.sequential,
                  verbose=True).kickoff()
-            _save_files(_parse_files(t.output.raw, "backend/"), ws)
+            _save_files(_parse_files(t.output.raw, "backend/"), self.ws)
             reran = True
 
-        if not reran:
-            break
+        return reran
 
-    outputs["workspace"] = str(ws.resolve())
-    print(f"\n[done] All files written to {ws.resolve()}")
-    return outputs
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+
+    def run(self) -> dict:
+        """
+        Execute the full pipeline and return a summary of written artefacts.
+
+        Stages
+        ------
+          1. Set up all agents.
+          2. Phase 1: manager → contracts → UI → backend.
+          3. Persist Phase 1 outputs (parse contracts, save files).
+          4. Phase 2: frontend (main.js) with injected UI HTML.
+          5. Phase 3: review loop (up to MAX_REVIEW_ROUNDS passes).
+
+        Returns
+        -------
+        A dict containing:
+          plan            — path to plan.md
+          design_contract — the parsed design contract dict
+          data_contract   — the parsed data contract dict
+          workspace       — absolute path to the output directory
+        """
+        self._setup_agents()
+
+        task_plan, task_contracts, task_ui, task_backend = self._run_phase1()
+        self._persist_phase1(task_plan, task_contracts, task_ui, task_backend)
+        self._run_phase2(task_contracts)
+        self._run_review_loop()
+
+        self.outputs["workspace"] = str(self.ws.resolve())
+        print(f"\n[done] All files written to {self.ws.resolve()}")
+        return self.outputs
+
+
+# ---------------------------------------------------------------------------
+# Public helper kept for backward compatibility
+# ---------------------------------------------------------------------------
+
+def run_agency(prd_path: str, workspace: str = "workspaces/output") -> dict:
+    """
+    Convenience wrapper around SoftwareAgency.run().
+
+    Parameters
+    ----------
+    prd_path:  Path to a PDF or plain-text PRD file.
+    workspace: Directory where all generated artefacts will be written.
+
+    Returns
+    -------
+    Same dict as SoftwareAgency.run().
+    """
+    return SoftwareAgency(prd_path, workspace).run()
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +514,6 @@ if __name__ == "__main__":
         print("Usage: python -m src.agents.agents <prd_path> [workspace_dir]")
         sys.exit(1)
 
-    prd = sys.argv[1]
-    ws = sys.argv[2] if len(sys.argv) > 2 else "workspaces/output"
-    run_agency(prd, ws)
+    _prd = sys.argv[1]
+    _ws = sys.argv[2] if len(sys.argv) > 2 else "workspaces/output"
+    run_agency(_prd, _ws)
