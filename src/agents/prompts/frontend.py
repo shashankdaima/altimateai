@@ -25,9 +25,19 @@ async function api(method, path, body) {
   return res.status === 204 ? null : res.json();
 }
 
-// --- Navigation ---
 
-const SCREENS = [/* e.g. 'dashboard', 'todos' — one per <section id="screen-X"> */];
+function showError(nearId, msg) {
+  document.getElementById(nearId)
+    .insertAdjacentHTML('afterend',
+      '<p class="text-red-500 text-sm mt-1 error-msg">' + msg + '</p>');
+  setTimeout(() => document.querySelectorAll('.error-msg')
+    .forEach(el => el.remove()), 3000);
+}
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+// Fill this with every id suffix from <section id="screen-X"> in index.html
+
+const SCREENS = ['REPLACE_WITH_SCREEN_NAMES'];
 
 function show(name) {
   SCREENS.forEach(s => {
@@ -42,15 +52,76 @@ function show(name) {
   });
 }
 
-// --- Screen render functions ---
-// One async function per screen — fetch data, build HTML string, set innerHTML.
+// ── Render functions (one per screen) ────────────────────────────────────────
+// Each function fetches real data and writes HTML into the section element.
+// Paginated responses have shape: { items: [...], total, page, page_size }
+// — always access .items, never treat the response as an array directly.
 
-// async function renderDashboard() { ... }
+async function renderTodos() {
+  const data = await api('GET', '/todos');
+  const items = data.items ?? data;
+  const el = document.getElementById('list-todos');
+  el.innerHTML = items.map(t =>
+    '<li class="flex justify-between items-center py-2 border-b">'
+    + '<span>' + t.title + '</span>'
+    + '<button id="btn-delete-' + t.id + '" data-id="' + t.id + '"'
+    + ' class="text-red-500 text-sm">Delete</button>'
+    + '</li>'
+  ).join('');
+  // wire delete buttons rendered above
+  items.forEach(t => {
+    document.getElementById('btn-delete-' + t.id)
+      .addEventListener('click', async () => {
+        await api('DELETE', '/todos/' + t.id);
+        await renderTodos();
+      });
+  });
+}
 
-// --- Boot ---
+// ── Event listeners ───────────────────────────────────────────────────────────
+
+function wireEvents() {
+  // Add-todo button
+  const btnAdd = document.getElementById('btn-add-todo');
+  if (btnAdd) {
+    btnAdd.addEventListener('click', async () => {
+      const titleEl = document.getElementById('input-todo-title');
+      const title = titleEl.value.trim();
+      if (!title) return;
+      btnAdd.disabled = true;
+      try {
+        await api('POST', '/todos', { title });
+        titleEl.value = '';
+        await renderTodos();
+      } catch (e) { showError('btn-add-todo', e.message); }
+      finally { btnAdd.disabled = false; }
+    });
+  }
+
+  // Enter key on text inputs triggers associated button
+  document.querySelectorAll('input[type="text"]').forEach(input => {
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const btn = document.getElementById('btn-add-todo');
+        if (btn) btn.click();
+      }
+    });
+  });
+
+  // Checkbox toggles
+  document.querySelectorAll('input[type="checkbox"]').forEach(chk => {
+    chk.addEventListener('change', async () => {
+      const id = chk.dataset.id;
+      if (!id) return;
+      await api('PATCH', '/todos/' + id, { completed: chk.checked });
+      await renderTodos();
+    });
+  });
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
 
 (async () => {
-  // hide all sections except first, wire nav buttons
   SCREENS.forEach((s, i) => {
     const sec = document.getElementById('screen-' + s);
     if (i !== 0) sec.classList.add('hidden');
@@ -58,8 +129,8 @@ function show(name) {
     if (btn) btn.addEventListener('click', () => show(s));
   });
 
-  // initial render
-  // await renderDashboard();
+  wireEvents();
+  await renderTodos();
   show(SCREENS[0]);
 })();
 """
@@ -68,62 +139,37 @@ function show(name) {
 def task_description(ui_html: str) -> str:
     return (
         "You have been given the following HTML from the UI Designer.\n"
-        "Study it carefully — your JS must match every id, data-action, and section name.\n\n"
+        "Read every id, data-action, section name, and input carefully.\n\n"
         "=== ui/index.html ===\n"
         + ui_html
         + "\n=====================\n\n"
         "You also have:\n"
         "- The `design_contract` — screens and feature lists.\n"
-        "- The `data_contract` — API endpoints, methods, and payloads.\n\n"
-        "YOUR ENTIRE RESPONSE must be exactly this — nothing before, nothing after:\n\n"
-        "=== FILE: frontend/main.js ===\n"
-        "<javascript content here>\n\n"
-        "## Template — follow this structure exactly\n\n"
+        "- The `data_contract` — exact API paths, methods, and payloads.\n\n"
+        "Write `main.js` by filling in the template below.\n"
+        "Your response must start with the delimiter line and contain ONLY JavaScript.\n"
+        "Do NOT include any text, explanation, or markdown before or after the delimiter.\n\n"
+        "=== FILE: frontend/main.js ===\n\n"
+        "## Template — replace placeholder comments with real code\n\n"
         "```javascript\n"
         + _TEMPLATE
         + "```\n\n"
-        "## Rules\n\n"
-        "- NO AUTH. No login checks, no tokens, no redirects. Every screen is always accessible.\n"
-        "- Fill SCREENS with the id suffixes from every <section id=\"screen-X\"> in the HTML.\n"
-        "- Write one async render function per screen that fetches data and sets innerHTML.\n\n"
-        "### Event wiring — do ALL of these:\n"
-        "- For every <button id=\"btn-X\"> with data-action: attach a click listener.\n"
-        "  Read input values with document.getElementById('input-X').value.trim().\n"
-        "  Example:\n"
-        "    document.getElementById('btn-add-todo').addEventListener('click', async () => {\n"
-        "      const title = document.getElementById('input-todo-title').value.trim();\n"
-        "      if (!title) return;\n"
-        "      const btn = document.getElementById('btn-add-todo');\n"
-        "      btn.disabled = true;\n"
-        "      try {\n"
-        "        await api('POST', '/todos', { title });\n"
-        "        document.getElementById('input-todo-title').value = '';\n"
-        "        await renderTodos();\n"
-        "      } catch (e) { showError('btn-add-todo', e.message); }\n"
-        "      finally { btn.disabled = false; }\n"
-        "    });\n"
-        "- For every <input id=\"input-X\">: listen for 'keydown' and trigger the associated\n"
-        "  button click on Enter key.\n"
-        "- For every <input type=\"checkbox\" id=\"chk-X\"> or data-action=\"toggle-*\": listen\n"
-        "  for 'change' and call the PATCH endpoint.\n"
-        "- For every delete button: listen for 'click', call the DELETE endpoint, re-render.\n\n"
-        "### Error display:\n"
-        "  function showError(nearId, msg) {\n"
-        "    document.getElementById(nearId)\n"
-        "      .insertAdjacentHTML('afterend',\n"
-        "        '<p class=\"text-red-500 text-sm mt-1 error-msg\">' + msg + '</p>');\n"
-        "    setTimeout(() => document.querySelectorAll('.error-msg')\n"
-        "      .forEach(el => el.remove()), 3000);\n"
-        "  }\n\n"
-        "- Use the api() helper for every backend call — never raw fetch().\n"
-        "- After every POST/PATCH/DELETE, re-call the affected render function to refresh the DOM.\n"
-        "- Disable the triggering button during the API call (btn.disabled = true/false).\n"
-        "- Paginated endpoints: render items and append a 'Load more' button that fetches page+1.\n"
-        "- Output ONLY the === FILE: frontend/main.js === block. No prose, no other files."
+        "## Critical rules\n\n"
+        "1. SCREENS array: replace 'REPLACE_WITH_SCREEN_NAMES' with the actual id suffixes\n"
+        "   from every <section id=\"screen-X\"> found in the HTML above.\n"
+        "2. API paths: use EXACTLY the paths from data_contract.endpoints — no /api/ prefix\n"
+        "   unless the contract specifies it. E.g. if contract says /todos use /todos.\n"
+        "3. Paginated responses return { items, total, page, page_size } — always use .items.\n"
+        "4. Write one render function per screen. Call ALL of them in the boot block.\n"
+        "5. wireEvents() must attach listeners to every button, input, and checkbox by id.\n"
+        "6. After every POST/PATCH/DELETE call the affected render function to refresh the DOM.\n"
+        "7. Disable buttons during async calls (btn.disabled = true / false in finally).\n"
+        "8. NO AUTH — no redirects, no tokens, every screen is always accessible.\n"
+        "9. Your entire response is the JS file content only — no surrounding text."
     ).strip()
 
 
 TASK_EXPECTED_OUTPUT = (
-    "Exactly one file: '=== FILE: frontend/main.js ===' — pure JavaScript, "
-    "no HTML, no CSS."
+    "Exactly one file starting with '=== FILE: frontend/main.js ===' — "
+    "pure JavaScript only, no prose."
 )

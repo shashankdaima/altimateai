@@ -1,7 +1,10 @@
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+from json_repair import repair_json
 
 from crewai import Agent, Crew, LLM, Process, Task
 
@@ -10,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.tools.file_writer import write_json, write_text# noqa
 from src.tools.pdf_reader import extract_text  # noqa
-from src.agents.prompts import backend, contract, frontend, manager, ui_designer # noqa
+from src.agents.prompts import backend, contract, frontend, manager, reviewer, ui_designer # noqa
 from src.config import USE_LOCAL_MODEL
 
 # ---------------------------------------------------------------------------
@@ -40,40 +43,87 @@ def _save_files(files: dict[str, str], workspace: Path) -> None:
 def _parse_contracts(raw: str) -> tuple[dict, dict]:
     """Extract design_contract and data_contract from JSON agent output."""
     cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
-    data = json.loads(cleaned)
-    return data["design_contract"], data["data_contract"]
+
+    # 1. Try strict parse
+    try:
+        data = json.loads(cleaned)
+        return data["design_contract"], data["data_contract"]
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Try programmatic repair (handles trailing commas, missing quotes, etc.)
+    print("[contracts] Strict JSON parse failed — trying json_repair ...")
+    repaired = repair_json(cleaned, return_objects=True)
+    if isinstance(repaired, dict) and "design_contract" in repaired:
+        print("[contracts] json_repair succeeded.")
+        return repaired["design_contract"], repaired["data_contract"]
+
+    raise ValueError("json_repair could not produce valid contracts.")
 
 
 def _fix_contracts_with_llm(bad_raw: str, llm, max_retries: int = 3) -> tuple[dict, dict]:
-    """Re-prompt the LLM to fix broken JSON, retrying up to max_retries times."""
+    """Last resort: ask a dedicated LLM agent to rewrite the contracts as valid JSON."""
+    repair_agent = Agent(
+        role="JSON Contract Repair Specialist",
+        goal="Rewrite broken JSON contracts as perfectly valid JSON.",
+        backstory=(
+            "You are an expert at reading malformed JSON and rewriting it correctly. "
+            "You output ONLY raw JSON — no markdown, no prose, no explanation."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
     current = bad_raw
     for attempt in range(1, max_retries + 1):
-        print(f"[contracts] JSON parse failed — asking LLM to fix it (attempt {attempt}/{max_retries}) ...")
+        print(f"[contracts] LLM repair attempt {attempt}/{max_retries} ...")
+        # Show the LLM the specific error so it knows what to target
+        try:
+            json.loads(re.sub(r"```(?:json)?\s*|\s*```", "", current).strip())
+            error_hint = ""
+        except json.JSONDecodeError as e:
+            error_hint = f"\n\nSpecific error: {e}"
+
         fix_task = Task(
             description=(
-                "The following output was supposed to be a valid JSON object with keys "
-                "`design_contract` and `data_contract`, but it has syntax errors.\n\n"
-                "Broken output:\n"
-                "```\n" + current + "\n```\n\n"
-                "Return ONLY the corrected, valid JSON object — no markdown fences, "
-                "no prose, no extra keys. Just raw JSON."
+                "The output below must be a valid JSON object with exactly two keys: "
+                "`design_contract` and `data_contract`.\n"
+                "It currently has syntax errors — rewrite it as valid JSON."
+                + error_hint
+                + "\n\nBroken output:\n```\n" + current + "\n```\n\n"
+                "Return ONLY the corrected raw JSON. No markdown fences, no prose."
             ),
-            expected_output="A single valid JSON object with keys `design_contract` and `data_contract`.",
-            agent=Agent(
-                role="JSON Repair Specialist",
-                goal="Fix broken JSON and return only valid JSON.",
-                backstory="You fix malformed JSON outputs. You return only raw valid JSON, nothing else.",
-                llm=llm,
-                verbose=False,
-            ),
+            expected_output="A valid JSON object with keys `design_contract` and `data_contract`.",
+            agent=repair_agent,
         )
-        Crew(agents=[fix_task.agent], tasks=[fix_task], process=Process.sequential).kickoff()
+        Crew(agents=[repair_agent], tasks=[fix_task],
+             process=Process.sequential).kickoff()
         current = fix_task.output.raw
         try:
             return _parse_contracts(current)
         except Exception as exc:
-            print(f"[contracts] Still invalid after attempt {attempt}: {exc}")
-    raise ValueError(f"Could not produce valid contract JSON after {max_retries} attempts.")
+            print(f"[contracts] LLM repair attempt {attempt} still invalid: {exc}")
+
+    raise ValueError(f"Could not produce valid contract JSON after {max_retries} LLM attempts.")
+
+
+def _read_ws(path: Path) -> str:
+    """Read a workspace file, return empty string if missing."""
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _compile_check(ws: Path) -> str:
+    """Run py_compile on backend/main.py; return error string or empty string."""
+    backend_py = ws / "backend" / "main.py"
+    if not backend_py.exists():
+        return "backend/main.py not found"
+    result = subprocess.run(
+        [sys.executable, "-m", "py_compile", str(backend_py)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return f"backend/main.py syntax error:\n{result.stderr}"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +263,7 @@ def run_agency(prd_path: str, workspace: str = "workspaces/output") -> dict:
     fe_html_path = ws / "frontend" / "index.html"
     fe_html_path.parent.mkdir(parents=True, exist_ok=True)
     fe_html_path.write_text(ui_html, encoding="utf-8")
-    print(f"  [copied] ui/index.html → frontend/index.html")
+    print("  [copied] ui/index.html → frontend/index.html")
 
     be_files = _parse_files(task_backend.output.raw, "backend/")
     _save_files(be_files, ws)
@@ -242,10 +292,112 @@ def run_agency(prd_path: str, workspace: str = "workspaces/output") -> dict:
     if fe_files:
         _save_files(fe_files, ws)
     else:
-        # Agent didn't use the delimiter — save raw output as main.js
         fallback = ws / "frontend" / "main.js"
         fallback.write_text(task_frontend.output.raw, encoding="utf-8")
         print(f"  [fallback] saved raw frontend output → {fallback}")
+
+    # ------------------------------------------------------------------
+    # Phase 3: review loop — up to 3 attempts per component
+    # ------------------------------------------------------------------
+    review_agent = Agent(
+        role=reviewer.ROLE,
+        goal=reviewer.GOAL,
+        backstory=reviewer.BACKSTORY,
+        llm=llm,
+        verbose=True,
+    )
+
+    MAX_REVIEW_ROUNDS = 3
+    for round_num in range(1, MAX_REVIEW_ROUNDS + 1):
+        print(f"\n[review] Round {round_num}/{MAX_REVIEW_ROUNDS} ...")
+
+        # Collect compile errors
+        compile_errors = _compile_check(ws)
+
+        review_task = Task(
+            description=reviewer.task_description(
+                design_contract=json.dumps(design_contract, indent=2),
+                data_contract=json.dumps(data_contract, indent=2),
+                ui_html=_read_ws(ws / "ui" / "index.html"),
+                main_js=_read_ws(ws / "frontend" / "main.js"),
+                backend_py=_read_ws(ws / "backend" / "main.py"),
+                compile_errors=compile_errors,
+            ),
+            expected_output=reviewer.TASK_EXPECTED_OUTPUT,
+            agent=review_agent,
+        )
+        Crew(agents=[review_agent], tasks=[review_task],
+             process=Process.sequential, verbose=True).kickoff()
+
+        try:
+            raw = re.sub(r"```(?:json)?\s*|\s*```", "", review_task.output.raw).strip()
+            report = json.loads(raw)
+        except Exception as exc:
+            print(f"[review] Could not parse reviewer output: {exc}")
+            break
+
+        print(f"[review] Report: {json.dumps(report, indent=2)}")
+
+        if report.get("pass"):
+            print("[review] All checks passed.")
+            break
+
+        reran = False
+
+        # Re-run UI designer
+        if not report.get("ui", {}).get("ok", True):
+            print(f"[review] Fixing UI: {report['ui']['issues']}")
+            t = Task(
+                description=ui_designer.task_description()
+                    + f"\n\nReviewer issues to fix:\n{report['ui']['issues']}",
+                expected_output=ui_designer.TASK_EXPECTED_OUTPUT,
+                agent=ui_agent,
+                context=[task_contracts],
+            )
+            Crew(agents=[ui_agent], tasks=[t], process=Process.sequential,
+                 verbose=True).kickoff()
+            new_ui = _parse_files(t.output.raw, "ui/")
+            _save_files(new_ui, ws)
+            ui_html = new_ui.get("ui/index.html", ui_html)
+            (ws / "frontend" / "index.html").write_text(ui_html, encoding="utf-8")
+            reran = True
+
+        # Re-run frontend
+        if not report.get("frontend", {}).get("ok", True):
+            print(f"[review] Fixing frontend: {report['frontend']['issues']}")
+            t = Task(
+                description=frontend.task_description(ui_html)
+                    + f"\n\nReviewer issues to fix:\n{report['frontend']['issues']}",
+                expected_output=frontend.TASK_EXPECTED_OUTPUT,
+                agent=fe_agent,
+            )
+            Crew(agents=[fe_agent], tasks=[t], process=Process.sequential,
+                 verbose=True).kickoff()
+            fe_fixed = _parse_files(t.output.raw, "frontend/")
+            if fe_fixed:
+                _save_files(fe_fixed, ws)
+            else:
+                (ws / "frontend" / "main.js").write_text(
+                    t.output.raw, encoding="utf-8")
+            reran = True
+
+        # Re-run backend
+        if not report.get("backend", {}).get("ok", True):
+            print(f"[review] Fixing backend: {report['backend']['issues']}")
+            t = Task(
+                description=backend.task_description()
+                    + f"\n\nReviewer issues to fix:\n{report['backend']['issues']}",
+                expected_output=backend.TASK_EXPECTED_OUTPUT,
+                agent=be_agent,
+                context=[task_contracts],
+            )
+            Crew(agents=[be_agent], tasks=[t], process=Process.sequential,
+                 verbose=True).kickoff()
+            _save_files(_parse_files(t.output.raw, "backend/"), ws)
+            reran = True
+
+        if not reran:
+            break
 
     outputs["workspace"] = str(ws.resolve())
     print(f"\n[done] All files written to {ws.resolve()}")
