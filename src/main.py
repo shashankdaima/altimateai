@@ -5,10 +5,6 @@ AltimateAI — Main Entry Point
 2. Starts the generated FastAPI backend in Docker on port 5000.
 3. Serves the generated frontend HTML via nginx in Docker on port 3000.
 
-Usage:
-    uv run python -m src.main <prd_path> [workspace_dir]
-    uv run python -m src.main samples/TodoPRD.pdf
-    uv run python -m src.main stop
 """
 
 import sys
