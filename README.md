@@ -146,6 +146,16 @@ The pipeline generates all code, builds Docker images, and opens:
 - **Frontend** — http://localhost:3000
 - **Backend API** — http://localhost:5000/docs
 
+> **ℹ️ Success!**  
+> If everything works as expected, once the pipeline finishes, you’ll see URLs for your generated Backend and Frontend:
+
+- **Frontend:** [http://localhost:3000](http://localhost:3000)
+- **Backend:** [http://localhost:5000/docs](http://localhost:5000/docs)
+
+Below is an example screenshot (mock UI) of a running generated frontend:
+
+![Sample Frontend Screenshot](images/final_terminal.png)
+
 ---
 
 ## Agent responsibilities
