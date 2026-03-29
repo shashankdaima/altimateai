@@ -153,6 +153,8 @@ def delete_todo(item_id: int):
 - Use `session.get(Model, id)` for single-item lookups.
 - Use `len()` on a fetched list for totals — NEVER use `count()`.
 - Use `.model_validate(x.model_dump())` for schema conversion.
+- Create a table instance with `Item.model_validate(body.model_dump())` — never `Item(model_dict=...)`.
+- Update fields with `body.model_dump(exclude_unset=True)` — never `body.model_dict(...)`.
 - POST → status_code=201, DELETE → status_code=204.
 - NEVER write code outside a function or class body except imports, engine, and app setup.
 - Every endpoint path must match data_contract.endpoints exactly.

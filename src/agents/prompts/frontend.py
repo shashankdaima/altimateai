@@ -34,7 +34,9 @@ function showError(nearId, msg) {
 }
 
 // ── NAVIGATION (DO NOT CHANGE) ────────────────────────────────────────────
-/* FILL: replace with the id suffixes of every <section id="screen-X"> in index.html */
+/* FILL: replace with the id suffixes of every <section id="screen-X"> in index.html.
+   If the HTML has <section id="screen-dashboard"> and <section id="screen-todos">,
+   then SCREENS = ['dashboard', 'todos']  ← suffix only, NOT 'screen-dashboard'. */
 const SCREENS = ['FILL_SCREEN_1', 'FILL_SCREEN_2'];
 
 function show(name) {
@@ -53,11 +55,16 @@ function show(name) {
 
 // ── RENDER FUNCTIONS ──────────────────────────────────────────────────────
 /* FILL: write one async render function per screen.
-   Each function fetches data from the API and updates the DOM.
-   Use the exact API paths from data_contract.endpoints.
-   Paginated responses: { items, total, page, page_size } — use .items.
+   Rules:
+   - Each render function fetches from a LIST endpoint (GET /resource) — never by dynamic id.
+   - Use the EXACT path from data_contract.endpoints. Never add /api/ prefix.
+   - Paginated responses: { items, total, page, page_size } — use .items.
+   - After setting innerHTML, re-wire any buttons inside the new HTML.
+   - Use the item's numeric id (t.id) in API paths — NEVER use a SCREENS value as an id.
+   - If two screens show the same resource with different filters, add a filter param
+     (e.g., renderTodos(filter='pending')) rather than fetching by id.
 
-   Example for a todo list screen:
+   Example:
 
    async function renderDashboard() {
      const data = await api('GET', '/todos');
@@ -68,12 +75,11 @@ function show(name) {
        + '<button id="btn-delete-' + t.id + '" class="text-red-500 text-sm px-2">Delete</button>'
        + '</li>'
      ).join('');
-     // re-wire delete buttons after innerHTML update
      items.forEach(t => {
        document.getElementById('btn-delete-' + t.id)
          .addEventListener('click', async () => {
            try {
-             await api('DELETE', '/todos/' + t.id);
+             await api('DELETE', '/todos/' + t.id);   // t.id is a number, not a screen name
              await renderDashboard();
            } catch(e) { showError('btn-delete-' + t.id, e.message); }
          });
@@ -156,18 +162,26 @@ def task_description(ui_html: str) -> str:
         + _JS_TEMPLATE
         + "\n\n"
         "## What to fill in\n\n"
-        "1. SCREENS array — replace 'FILL_SCREEN_1', 'FILL_SCREEN_2' with the actual\n"
-        "   id suffixes from every <section id=\"screen-X\"> in the HTML above.\n\n"
-        "2. Render functions — one per screen. Fetch from the exact API path in\n"
-        "   data_contract.endpoints. Use .items on paginated responses. Re-wire any\n"
-        "   buttons rendered dynamically inside innerHTML after setting it.\n\n"
-        "3. wireEvents() function body — attach click/change/keydown listeners to every\n"
-        "   button, input, and checkbox by their id from the HTML. After every\n"
-        "   POST/PATCH/DELETE call the affected render function.\n\n"
-        "4. Boot section render calls — uncomment and add one await renderX() per screen.\n\n"
-        "DO NOT call /todos/new or any endpoint not in data_contract.\n"
-        "DO NOT redefine api(), showError(), show(), or the boot IIFE.\n"
-        "Output ONLY the completed JS file inside the delimiter. No prose."
+        "1. SCREENS array — replace 'FILL_SCREEN_1', 'FILL_SCREEN_2' with the\n"
+        "   id suffix of every <section id=\"screen-X\"> in the HTML above.\n"
+        "   Rule: suffix ONLY — no 'screen-' prefix.\n"
+        "   Example: <section id=\"screen-dashboard\"> → SCREENS entry is 'dashboard'.\n\n"
+        "2. Render functions — one per screen.\n"
+        "   - Call a LIST endpoint (GET /resource) — never fetch by dynamic id in a render function.\n"
+        "   - Path must match data_contract exactly (no /api/ prefix, no extra segments).\n"
+        "   - Use data.items (paginated) or data directly (array).\n"
+        "   - Re-wire dynamically created buttons inside the forEach after innerHTML.\n"
+        "   - Use t.id (number from the item) in DELETE/PATCH paths — never use a SCREENS value.\n\n"
+        "3. wireEvents() — attach ONE listener per element id from the HTML.\n"
+        "   - Do not attach the same listener twice.\n"
+        "   - After POST/PATCH/DELETE call the affected render function.\n\n"
+        "4. Boot render calls — add one await renderX() per screen.\n\n"
+        "NEVER:\n"
+        "- Add '/api/' prefix — paths are exactly as in data_contract.\n"
+        "- Use SCREENS[i] or a screen name as an API path segment.\n"
+        "- Wire the same element id more than once.\n"
+        "- Redefine api(), showError(), show(), or the boot IIFE.\n\n"
+        "Output ONLY the completed JS inside the delimiter. No prose."
     ).strip()
 
 

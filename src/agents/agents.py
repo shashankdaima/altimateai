@@ -113,7 +113,7 @@ def _read_ws(path: Path) -> str:
 
 
 def _compile_check(ws: Path) -> str:
-    """Run py_compile on backend/main.py; return error string or empty string."""
+    """Run py_compile on backend/main.py and grep for known runtime pitfalls."""
     backend_py = ws / "backend" / "main.py"
     if not backend_py.exists():
         return "backend/main.py not found"
@@ -123,7 +123,47 @@ def _compile_check(ws: Path) -> str:
     )
     if result.returncode != 0:
         return f"backend/main.py syntax error:\n{result.stderr}"
-    return ""
+
+    # Additional static checks for known runtime pitfalls
+    code = backend_py.read_text(encoding="utf-8")
+    issues = []
+    if "model_dict" in code:
+        issues.append("model_dict() is not a real Pydantic/SQLModel method — use model_dump() instead")
+    if "body.dict(" in code:
+        issues.append("body.dict() is deprecated — use body.model_dump()")
+    if "CORSMiddleware" not in code:
+        issues.append("CORSMiddleware missing — CORS will be broken")
+    return "\n".join(issues)
+
+
+def _js_check(ws: Path) -> str:
+    """Static checks on frontend/main.js for known pitfalls."""
+    js_path = ws / "frontend" / "main.js"
+    if not js_path.exists():
+        return "\nfrontend/main.js not found"
+    code = js_path.read_text(encoding="utf-8")
+    issues = []
+
+    # SCREENS values must be plain suffixes (no 'screen-' prefix inside the array)
+    import re
+    screens_match = re.search(r"const SCREENS\s*=\s*\[([^\]]+)\]", code)
+    if screens_match:
+        entries = screens_match.group(1)
+        if "screen-" in entries:
+            issues.append(
+                "JS: SCREENS array contains 'screen-' prefix — values must be "
+                "suffixes only (e.g. 'dashboard', not 'screen-dashboard')"
+            )
+
+    # API paths must not contain /api/
+    if "'/api/" in code or '"/api/' in code:
+        issues.append("JS: API call uses /api/ prefix — paths must match data_contract exactly (no /api/)")
+
+    # Must define wireEvents
+    if "function wireEvents" not in code:
+        issues.append("JS: wireEvents() function is missing")
+
+    return ("\n" + "\n".join(issues)) if issues else ""
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +351,9 @@ def run_agency(prd_path: str, workspace: str = "workspaces/output") -> dict:
     for round_num in range(1, MAX_REVIEW_ROUNDS + 1):
         print(f"\n[review] Round {round_num}/{MAX_REVIEW_ROUNDS} ...")
 
-        # Collect compile errors
+        # Collect compile + static errors
         compile_errors = _compile_check(ws)
+        compile_errors += _js_check(ws)
 
         review_task = Task(
             description=reviewer.task_description(
