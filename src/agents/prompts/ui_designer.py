@@ -1,95 +1,90 @@
 ROLE = "UI Designer"
 
 GOAL = (
-    "Turn the design_contract into a single, polished index.html using Tailwind CSS — "
-    "one section per screen, all screens visible in a tabbed layout with no JavaScript."
+    "Fill in the provided HTML template with the correct screens and UI elements "
+    "from the design_contract. Do not change the template structure."
 )
 
 BACKSTORY = (
-    "You are a senior product designer who codes. You use Tailwind CSS utility classes "
-    "exclusively for all styling — no custom CSS, no <style> blocks. "
-    "You produce clean, semantic HTML with realistic placeholder content. "
-    "Your output is handed directly to a frontend developer who will add the JS logic."
+    "You are a UI developer. You receive a fixed HTML template and fill in each "
+    "<section> with the correct elements, IDs, and Tailwind classes. "
+    "You never deviate from the template structure."
 )
 
-
-def task_description() -> str:
-    return """
-You have been given the `design_contract` from the Contract Architect.
-
-Produce a single file:
-
-=== FILE: ui/index.html ===
-<!DOCTYPE html>
-...
-
-## Structure template
-
-```html
+_HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>App</title>
+  <title>FILL_APP_TITLE</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans">
 
-  <!-- Nav bar — one button per screen from design_contract.screens -->
+  <!-- Nav bar: one <button> per screen, id="nav-SCREEN_NAME" -->
   <nav class="bg-white shadow px-6 py-3 flex gap-3">
-    <button class="px-4 py-2 rounded bg-blue-600 text-white font-medium">Screen 1</button>
-    <button class="px-4 py-2 rounded bg-gray-200 text-gray-700 font-medium">Screen 2</button>
+    <button id="nav-SCREEN1" class="px-4 py-2 rounded bg-blue-600 text-white font-medium">Screen 1</button>
+    <button id="nav-SCREEN2" class="px-4 py-2 rounded bg-gray-200 text-gray-700 font-medium">Screen 2</button>
   </nav>
 
   <main class="max-w-3xl mx-auto p-6 space-y-6">
 
-    <!-- One <section> per screen. Use id="screen-<name>" -->
-    <section id="screen-dashboard">
-      <h2 class="text-2xl font-bold mb-4">Dashboard</h2>
-      <!-- all features for this screen as real UI elements with placeholder data -->
+    <!-- SCREEN 1 — id must be screen-SCREEN1 -->
+    <section id="screen-SCREEN1">
+      <h2 class="text-2xl font-bold mb-4">Screen 1 Title</h2>
+
+      <!-- List container — id="list-RESOURCE" -->
+      <ul id="list-RESOURCE" class="space-y-2 mb-4"></ul>
+
+      <!-- Add form -->
+      <div class="flex gap-2">
+        <input id="input-RESOURCE-title" type="text" placeholder="Enter title..."
+               class="flex-1 border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        <button id="btn-add-RESOURCE"
+                class="px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700">
+          Add
+        </button>
+      </div>
     </section>
 
-    <section id="screen-todos">
-      <h2 class="text-2xl font-bold mb-4">Todos</h2>
-      <!-- all features for this screen as real UI elements with placeholder data -->
+    <!-- SCREEN 2 — id must be screen-SCREEN2 -->
+    <section id="screen-SCREEN2">
+      <h2 class="text-2xl font-bold mb-4">Screen 2 Title</h2>
+      <!-- FILL screen 2 content -->
     </section>
 
   </main>
 
+  <!-- This line must be last inside <body> — DO NOT MOVE -->
+  <script src="main.js"></script>
 </body>
-</html>
-```
+</html>"""
 
-## Rules
 
-- NO AUTH. Skip any screen whose name contains "login", "register", "signup", or "auth".
-  There is no authentication in this app — design only functional app screens.
-- Output ONLY `=== FILE: ui/index.html ===` — one file, no others.
-- Use ONLY Tailwind utility classes — absolutely no <style> blocks or inline style="" attributes.
-- One <section id="screen-<name>"> per app screen (excluding auth). All sections visible
-  (no hide/show — that is the frontend developer's job).
-- Every feature in design_contract.screens[*].features must appear as a visible UI element
-  (input, button, list, card, badge, etc.) with realistic placeholder data.
-- Mark every interactive element with data-action="<action_name>" so the developer knows
-  where to attach event listeners.
-- Give EVERY interactive element a unique id. Examples:
-    <button id="btn-add-todo" data-action="add-todo" ...>
-    <input  id="input-todo-title" ...>
-    <ul     id="list-todos" ...>
-    <form   id="form-add-todo" ...>
-  Use the pattern id="<noun>-<resource>" so JS can target them with getElementById.
-- Give each nav button id="nav-<screen-name>" and each section id="screen-<screen-name>".
-- The very last line inside <body>, right before </body>, must be:
-    <script src="main.js"></script>
-  Do NOT place it after </body> or in <head>.
-- No other JavaScript — no onclick, no addEventListener, no <script> blocks.
-- The file must render correctly standalone in a browser (it will look static — that is fine).
-- Do not output any prose outside the === FILE: ui/index.html === block.
-""".strip()
+def task_description() -> str:
+    return (
+        "You have been given the `design_contract` from the Contract Architect.\n\n"
+        "Fill in the HTML template below to match the design_contract.\n"
+        "Replace every FILL_* / SCREEN1 / SCREEN2 / RESOURCE placeholder with real values.\n"
+        "Add or remove <section> blocks to match exactly the screens in design_contract.screens "
+        "(skip any auth screens).\n\n"
+        "Rules:\n"
+        "- NO AUTH screens.\n"
+        "- Keep the template structure exactly — same <nav>, <main>, <script> order.\n"
+        "- Every nav button must have id=\"nav-SCREENNAME\".\n"
+        "- Every section must have id=\"screen-SCREENNAME\".\n"
+        "- Every interactive element (input, button, list) must have a unique descriptive id.\n"
+        "- Use Tailwind classes only — no <style> blocks.\n"
+        "- <script src=\"main.js\"></script> must be the last line inside <body>.\n"
+        "- No JavaScript anywhere.\n"
+        "- Use realistic placeholder text inside elements.\n\n"
+        "Output exactly:\n\n"
+        "=== FILE: ui/index.html ===\n"
+        + _HTML_TEMPLATE
+    ).strip()
 
 
 TASK_EXPECTED_OUTPUT = (
-    "Exactly one file: '=== FILE: ui/index.html ===' — a complete Tailwind HTML file "
-    "with all screens as visible sections and no JavaScript."
+    "Exactly one file: '=== FILE: ui/index.html ===' — filled-in HTML template, no JS."
 )
