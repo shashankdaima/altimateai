@@ -67,34 +67,41 @@ The two contracts are the shared source of truth between all agents.
 ```
 altimateai/
 ├── src/
-│   ├── main.py              # Entry point: runs agency then starts Docker containers
-│   ├── config.py            # LLM config, Docker constants, Dockerfile templates
-│   └── agents/
-│       ├── agents.py        # SoftwareAgency class + run_agency() convenience wrapper
-│       ├── utils.py         # Helpers: file parsing, contract repair, static checks
-│       └── prompts/
-│           ├── manager.py
-│           ├── contract.py
-│           ├── ui_designer.py
-│           ├── frontend.py
-│           ├── backend.py
-│           └── reviewer.py
-├── src/tools/
-│   ├── pdf_reader.py        # extract_text, extract_pages, extract_metadata, extract_images
-│   ├── file_writer.py       # write_text, write_json, write_csv, write_bytes, append_text
-│   └── screenshot.py        # screenshot_url, screenshot_element, screenshot_html
-├── samples/                 # Sample PRD files
-├── tests/
-├── workspaces/              # Generated output (gitignored)
+│   ├── main.py                    # Entry point: runs agency then starts Docker containers
+│   ├── config.py                  # LLM config, Docker constants, Dockerfile templates
+│   ├── agents/
+│   │   ├── agents.py              # SoftwareAgency class + run_agency() wrapper
+│   │   ├── utils.py               # File parsing, contract repair, static JS/PY checks
+│   │   └── prompts/
+│   │       ├── manager.py
+│   │       ├── contract.py
+│   │       ├── ui_designer.py
+│   │       ├── frontend.py
+│   │       ├── backend.py
+│   │       └── reviewer.py
+│   └── tools/
+│       ├── pdf_reader.py          # extract_text, extract_pages, extract_metadata, extract_images
+│       ├── file_writer.py         # write_text, write_json, write_csv, write_bytes, append_text
+│       └── screenshot.py          # screenshot_url, screenshot_element, screenshot_html
+├── samples/                       # Sample PRD files (PDF)
+│   ├── TodoPRD.pdf
+│   ├── TodoMate_PRD.pdf
+│   └── PollSnap_PRD.pdf
+├── images/
+│   └── excallidraw.png
+├── workspaces/                    # Generated output (gitignored)
 │   └── output/
 │       ├── plan.md
 │       ├── contracts/
 │       │   ├── design_contract.json
 │       │   └── data_contract.json
-│       ├── ui/              # Static HTML from UI Designer
-│       ├── frontend/        # index.html + main.js (served by nginx)
-│       └── backend/         # FastAPI app (hot-reload via volume mount)
+│       ├── ui/                    # Static HTML from UI Designer
+│       ├── frontend/              # index.html + main.js (served by nginx)
+│       └── backend/               # FastAPI app (hot-reload via volume mount)
+├── Dockerfile
+├── docker-compose.yml
 ├── pyproject.toml
+├── uv.lock
 └── CLAUDE.md
 ```
 
@@ -126,10 +133,10 @@ MODEL_CONFIG=cloud
 
 ```bash
 # Generate + deploy from a PDF PRD
-uv run python -m src.main samples/TodoPRD.pdf
+ANTHROPIC_API_KEY=sk-ant-... uv run python -m src.main samples/TodoMate_PRD.pdf 2>&1
 
 # Custom output directory
-uv run python -m src.main samples/TodoPRD.pdf workspaces/my_project
+ANTHROPIC_API_KEY=sk-ant-... uv run python -m src.main samples/TodoMate_PRD.pdf workspaces/my_project 2>&1
 
 # Stop running containers
 uv run python -m src.main stop
