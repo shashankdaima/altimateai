@@ -6,6 +6,10 @@ running full-stack web application. Give it a PDF, get back a live app.
 ---
 
 ## How it works
+<img src="images/excallidraw.png" alt="AltimateAI Pipeline Architecture" width="600" />
+
+
+
 
 ```
 PRD (PDF or text)
